@@ -7,6 +7,7 @@ from plot_utils import statistics_feature
 from dgl.nn.pytorch.softmax import edge_softmax
 import dgl
 import dgl.function as fn
+from local_structure import get_graph_local_structure
 
 
 statistics_plot = statistics_feature()
@@ -52,7 +53,7 @@ def loss_fn_kd(logits, logits_t, alpha=1.0, T=10.0):
     #mse_loss = mse_loss_fn(logits, logits_t)
     return ce_loss*alpha + (1-alpha)*kl_loss
 
-def gen_mi_loss(auxiliary_model, middle_feats_s, subgraph, feats, fixed_subgraph, fixed_feats, device, class_loss):
+def gen_mi_loss(t_model, middle_feats_s, subgraph, feats):
     """
     Params:
         middle_feats_s  -   student's middle features
@@ -60,32 +61,15 @@ def gen_mi_loss(auxiliary_model, middle_feats_s, subgraph, feats, fixed_subgraph
         feats  -  the input features
         device - pytorch device
     """
-    loss_fcn = nn.MSELoss(reduction="none")
-
-    #middle_feats_s = auxiliary_model['upsampling_model']['model'](subgraph, middle_feats_s)
-
-    t_model = auxiliary_model['t_model']['model']
-    
     with torch.no_grad():
-        t_model.g = subgraph
-        for layer in t_model.gat_layers:
-            layer.g = subgraph
-        _, middle_feats_t = t_model(feats.float(), middle=True)
+        _, middle_feats_t = t_model(subgraph, feats.float(), middle=True)
         middle_feats_t = middle_feats_t[1]
     
-    dist_t = auxiliary_model['local_model']['model'](subgraph, middle_feats_t)
-    dist_s = auxiliary_model['local_model']['model'](subgraph, middle_feats_s)
+    dist_t = get_graph_local_structure(subgraph, middle_feats_t)
+    dist_s = get_graph_local_structure(subgraph, middle_feats_s)
     graphKL_loss = graph_KLDiv(subgraph, dist_s, dist_t)
     return graphKL_loss
-    """
-    local_feats_s, att_s = auxiliary_model['local_model_s']['model'](subgraph, middle_feats_s)
-    local_fests_t, att_t = auxiliary_model['local_model']['model'](subgraph, middle_feats_t)
-    feat_mse = loss_fcn(local_feats_s, local_fests_t)
-    feat_mse = feat_mse
-    #att_mse = loss_fcn(att_s, att_t)
-    att_kl = graph_KLDiv(subgraph, att_s, att_t)
-    return torch.mean(feat_mse) + att_kl*1
-    """
+
 
 def gen_att_loss(auxiliary_model, middle_feats_s, subgraph, feats, device):
     """
@@ -96,10 +80,7 @@ def gen_att_loss(auxiliary_model, middle_feats_s, subgraph, feats, device):
     t_model = auxiliary_model['t_model']['model']
     
     with torch.no_grad():
-        t_model.g = subgraph
-        for layer in t_model.gat_layers:
-            layer.g = subgraph
-        _, middle_feats_t = t_model(feats.float(), middle=True)
+        _, middle_feats_t = t_model(subgraph, feats.float(), middle=True)
         middle_feats_t = middle_feats_t[1].detach()
     
     middle_feats_t = torch.abs(middle_feats_t)
@@ -110,7 +91,7 @@ def gen_att_loss(auxiliary_model, middle_feats_s, subgraph, feats, device):
     
     return loss_fcn(middle_feats_s, middle_feats_t)
 
-
+## problem
 def gen_fit_loss(auxiliary_model, middle_feats_s, subgraph, feats, device):
     """
     generate the loss according to a similar stratagy shown in fitnets paper
@@ -122,10 +103,7 @@ def gen_fit_loss(auxiliary_model, middle_feats_s, subgraph, feats, device):
     t_model = auxiliary_model['t_model']['model']
     
     with torch.no_grad():
-        t_model.g = subgraph
-        for layer in t_model.gat_layers:
-            layer.g = subgraph
-        _, middle_feats_t = t_model(feats.float(), middle=True)
+        _, middle_feats_t = t_model(subgraph, feats.float(), middle=True)
         middle_feats_t = middle_feats_t[1].detach()
     
     return loss_fcn(upsampled_feats_s, middle_feats_t)

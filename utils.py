@@ -9,36 +9,106 @@ from sklearn.metrics import f1_score
 import dgl
 from dgl.data.ppi import LegacyPPIDataset as PPIDataset
 from gat import GAT, GCN
+from auxilary_loss import gen_mi_loss
 
 
-def evaluate(feats, model, subgraph, labels, loss_fcn):
-    model.eval()
-    with torch.no_grad():
-        model.g = subgraph
-        for layer in model.gat_layers:
-            layer.g = subgraph
-        output = model(feats.float())
-        loss_data = loss_fcn(output, labels.float())
-        predict = np.where(output.data.cpu().numpy() >= 0.5, 1, 0)
-        score = f1_score(labels.data.cpu().numpy(),
-                         predict, average='micro')
+class FullLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.regular_loss = torch.nn.BCEWithLogitsLoss()
+
+    def forward(self, logits, labels, inputs, graph, middle_feats_s, target, loss_weight, t_model):
+        loss = self.regular_loss(logits, labels)
+        return loss, torch.tensor([0])
+
+
+class TeacherLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.regular_loss = torch.nn.BCEWithLogitsLoss()
+
+    def forward(self, logits, labels, inputs, graph, middle_feats_s, target, loss_weight, t_model):
+        loss = self.regular_loss(logits, labels)
+        return loss, torch.tensor([0])
+
+class MILoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.regular_loss = torch.nn.BCEWithLogitsLoss()
+
+    def forward(self, logits, labels, graph, inputs, middle_feats_s, target, loss_weight, t_model):
+        reg_loss = self.regular_loss(logits, labels)
+        #logits_t = t_model(graph, inputs)
+        lsp_loss = gen_mi_loss(t_model, middle_feats_s[target], graph, inputs)
+        return reg_loss + loss_weight * lsp_loss, lsp_loss
+
+
+def train_epoch(train_dataloader, model, loss_fcn, optimizer, device):
     model.train()
-    
-    return score, loss_data.item()
+    loss_list = []
+    for batch, batch_data in enumerate(train_dataloader):
+        # getting the data
+        subgraph, feats, labels = batch_data
+        feats, labels = feats.to(device), labels.to(device)
 
-def test_model(test_dataloader, model, device, loss_fcn):
-    test_score_list = []
+        # forward pass
+        logits = model(subgraph, feats.float())
+        loss = loss_fcn(logits, labels.float())
+        
+        # backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        loss_list.append(loss.item())
+    return np.array(loss_list).mean()
+
+
+def evaluate(dataloader, model, loss_func, device):
     model.eval()
-    with torch.no_grad():
-        for batch, test_data in enumerate(test_dataloader):
-            subgraph, feats, labels = test_data
-            feats = feats.to(device)
-            labels = labels.to(device)
-            test_score_list.append(evaluate(feats, model, subgraph, labels.float(), loss_fcn)[0])
-        mean_score = np.array(test_score_list).mean()
-        print(f"F1-Score on testset:        {mean_score:.4f}")
+    score_list = []
+    val_loss_list = []
+    for batch, graph_data in enumerate(dataloader):
+        # getting data
+        subgraph, feats, labels = graph_data
+        feats, labels = feats.to(device), labels.to(device)
+        
+        # forward
+        with torch.no_grad():
+            output = model(subgraph, feats.float())
+            val_loss = loss_func(output, labels.float())
+            predict = np.where(output.data.cpu().numpy() >= 0.5, 1, 0)
+            score = f1_score(labels.data.cpu().numpy(), predict, average='micro')
+
+        # storing stats
+        score_list.append(score)
+        val_loss_list.append(val_loss.item())
+    mean_score = np.array(score_list).mean()
+    mean_val_loss = np.array(val_loss_list).mean()
+    return mean_score, mean_val_loss
+
+
+def train_epoch_s(train_dataloader, model, model_t,loss_fcn, optimizer, device, args):
     model.train()
-    return mean_score
+    loss_list = []
+    lsp_loss_list = []
+    for batch, batch_data in enumerate(train_dataloader):
+        # getting the data
+        subgraph, feats, labels = batch_data
+        feats, labels = feats.to(device), labels.to(device)
+
+        # forward pass
+        logits, middle_feats_s = model(subgraph, feats.float(), middle=True)
+        loss, lsp_loss = loss_fcn(logits, labels.float(), subgraph, feats.float(), middle_feats_s, args.target_layer, args.loss_weight, model_t)
+        
+        # backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        loss_list.append(loss.item())
+        lsp_loss_list.append(lsp_loss.item())
+    return np.array(loss_list).mean(), np.array(lsp_loss_list).mean()
 
 
 def generate_label(t_model, subgraph, feats, device):
@@ -47,45 +117,14 @@ def generate_label(t_model, subgraph, feats, device):
     # t_model.to(device)
     t_model.eval()
     with torch.no_grad():
-        t_model.g = subgraph
-        for layer in t_model.gat_layers:
-            layer.g = subgraph
         # soft labels
-        logits_t = t_model(feats.float())
+        logits_t = t_model(subgraph, feats.float())
         #pseudo_labels = torch.where(t_logits>0.5, 
         #                            torch.ones(t_logits.shape).to(device), 
         #                            torch.zeros(t_logits.shape).to(device))
         #labels = logits_t
     return logits_t.detach()
     
-
-def evaluate_model(valid_dataloader, train_dataloader, device, s_model, loss_fcn):
-    score_list = []
-    val_loss_list = []
-    s_model.eval()
-    with torch.no_grad():
-        for batch, valid_data in enumerate(valid_dataloader):
-            subgraph, feats, labels = valid_data
-            feats = feats.to(device)
-            labels = labels.to(device)
-            score, val_loss = evaluate(feats.float(), s_model, subgraph, labels.float(), loss_fcn)
-            score_list.append(score)
-            val_loss_list.append(val_loss)
-    mean_score = np.array(score_list).mean()
-    mean_val_loss = np.array(val_loss_list).mean()
-    print(f"F1-Score on valset  :        {mean_score:.4f} ")
-    s_model.train()
-    return mean_score
-
-    """
-    train_score_list = []
-    for batch, train_data in enumerate(train_dataloader):
-        subgraph, feats, labels = train_data
-        feats = feats.to(device)
-        labels = labels.to(device)
-        train_score_list.append(evaluate(feats, s_model, subgraph, labels.float(), loss_fcn)[0])
-    print(f"F1-Score on trainset:        {np.array(train_score_list).mean():.4f}")
-    """
 
 def collate(sample):
     graphs, feats, labels =map(list, zip(*sample))
@@ -111,8 +150,7 @@ def get_teacher(args, data_info):
     data_info holds some special arugments
     '''
     heads = ([args.t_num_heads] * args.t_num_layers) + [args.t_num_out_heads]
-    model = GAT(data_info['g'],
-            args.t_num_layers,
+    model = GAT(args.t_num_layers,
             data_info['num_feats'],
             args.t_num_hidden,
             data_info['n_classes'],
@@ -129,8 +167,7 @@ def get_student(args, data_info):
     data_info holds some special arugments
     '''
     heads = ([args.s_num_heads] * args.s_num_layers) + [args.s_num_out_heads]
-    model = GAT(data_info['g'],
-            args.s_num_layers,
+    model = GAT(args.s_num_layers,
             data_info['num_feats'],
             args.s_num_hidden,
             data_info['n_classes'],
@@ -144,6 +181,7 @@ def get_student(args, data_info):
 
 def get_feat_info(args):
     feat_info = {}
+    # list multpilication [3] * 3 == [3,3,3]
     feat_info['s_feat'] = [args.s_num_heads*args.s_num_hidden] * args.s_num_layers
     feat_info['t_feat'] = [args.t_num_heads*args.t_num_hidden] * args.t_num_layers
     #assert len(feat_info['s_feat']) == len(feat_info['t_feat']),"number of hidden layer for teacher and student are not equal"
@@ -160,7 +198,6 @@ def get_data_loader(args):
     test_dataset = PPIDataset(mode='test')
     
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collate, num_workers=4, shuffle=True)
-    fixed_train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collate, num_workers=4)
     valid_dataloader = DataLoader(valid_dataset, batch_size=args.batch_size, collate_fn=collate, num_workers=2)
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, collate_fn=collate, num_workers=2)
 
@@ -171,7 +208,7 @@ def get_data_loader(args):
     data_info['n_classes'] = n_classes
     data_info['num_feats'] = num_feats
     data_info['g'] = g
-    return (train_dataloader, valid_dataloader, test_dataloader, fixed_train_dataloader), data_info
+    return (train_dataloader, valid_dataloader, test_dataloader), data_info
 
 
 def save_checkpoint(model, path):
