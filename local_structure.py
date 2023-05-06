@@ -76,6 +76,36 @@ def get_graph_local_structure(graph, feats):
             e = edge_softmax(graph, e)
         return e
 
+def get_graph_twohop_local_structures(graph,feats):
+        with graph.local_scope():
+            feats = feats.view(-1, 1, feats.shape[1])
+            print(graph.number_of_edges())
+            src,dst = [],[]
+            indices = []
+            n = graph.number_of_nodes()
+    
+            for i in range(n):
+                dst_nodes = set()
+                for g in dgl.unbatch(graph):
+                    if g.has_nodes([i]):
+                        one_hop_neighbors = g.successors(i).tolist()
+                        for onehopnode in one_hop_neighbors:
+                            dst_nodes.update(g.successors(onehopnode).tolist())
+                if len(dst_nodes)!=0:
+                    indices.append(i)
+                src.extend([i]*len(dst_nodes))
+                dst.extend(list(dst_nodes))
+            two_hop_subgraph = dgl.graph((src, dst))
+            feats = feats[indices]
+            print(two_hop_subgraph.number_of_edges())
+            two_hop_subgraph.ndata.update({'ftl': feats, 'ftr': feats})
+            two_hop_subgraph.apply_edges(fn.u_sub_v('ftl', 'ftr', 'diff'))
+            e = two_hop_subgraph.edata.pop('diff')
+            e = torch.exp( (-1.0/100) * torch.sum(torch.abs(e), dim=-1) )
+            e = edge_softmax(two_hop_subgraph, e)
+        return e
+
+
 
 def get_upsampling_model(feat_info):
     '''upsampling the features of a graph

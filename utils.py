@@ -4,30 +4,30 @@ import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import torch.nn as nn
-
+from node2vec import Node2Vec
+import networkx as nx
 from sklearn.metrics import f1_score
 import dgl
 from dgl.data.ppi import LegacyPPIDataset as PPIDataset
 from gat import GAT, GCN
 from auxilary_loss import gen_mi_loss
 
-
 class FullLoss(nn.Module):
     def __init__(self):
         super().__init__()
         self.regular_loss = torch.nn.BCEWithLogitsLoss()
 
-    def forward(self, logits, labels, inputs, graph, middle_feats_s, target, loss_weight, t_model):
+    def forward(self, logits, labels, inputs, graph, middle_feats_s, s_target_lay,t_target_lay, loss_weight, t_model):
         loss = self.regular_loss(logits, labels)
         return loss, torch.tensor([0])
 
-
+ 
 class TeacherLoss(nn.Module):
     def __init__(self):
         super().__init__()
         self.regular_loss = torch.nn.BCEWithLogitsLoss()
 
-    def forward(self, logits, labels, inputs, graph, middle_feats_s, target, loss_weight, t_model):
+    def forward(self, logits, labels, inputs, graph, middle_feats_s, s_target_lay,t_target_lay, loss_weight, t_model):
         loss = self.regular_loss(logits, labels)
         return loss, torch.tensor([0])
 
@@ -36,10 +36,10 @@ class MILoss(nn.Module):
         super().__init__()
         self.regular_loss = torch.nn.BCEWithLogitsLoss()
 
-    def forward(self, logits, labels, graph, inputs, middle_feats_s, target, loss_weight, t_model):
+    def forward(self, logits, labels, graph, inputs, middle_feats_s, s_target_lay,t_target_lay, loss_weight, t_model):
         reg_loss = self.regular_loss(logits, labels)
         #logits_t = t_model(graph, inputs)
-        lsp_loss = gen_mi_loss(t_model, middle_feats_s[target], graph, inputs)
+        lsp_loss = gen_mi_loss(t_model, middle_feats_s, s_target_lay,t_target_lay, graph, inputs)
         return reg_loss + loss_weight * lsp_loss, lsp_loss
 
 
@@ -72,7 +72,7 @@ def evaluate(dataloader, model, loss_func, device):
         # getting data
         subgraph, feats, labels = graph_data
         feats, labels = feats.to(device), labels.to(device)
-        
+        print(feats.shape)
         # forward
         with torch.no_grad():
             output = model(subgraph, feats.float())
@@ -96,11 +96,12 @@ def train_epoch_s(train_dataloader, model, model_t,loss_fcn, optimizer, device, 
         # getting the data
         subgraph, feats, labels = batch_data
         feats, labels = feats.to(device), labels.to(device)
-
         # forward pass
         logits, middle_feats_s = model(subgraph, feats.float(), middle=True)
-        loss, lsp_loss = loss_fcn(logits, labels.float(), subgraph, feats.float(), middle_feats_s, args.target_layer, args.loss_weight, model_t)
-        
+        #print("Hello")
+        #list target layer
+        loss, lsp_loss = loss_fcn(logits, labels.float(), subgraph, feats.float(), middle_feats_s, args.target_layers_student,args.target_layers_teacher, args.loss_weight, model_t)
+        #add tech
         # backpropagation
         optimizer.zero_grad()
         loss.backward()
@@ -144,6 +145,18 @@ def collate_w_gk(sample):
     labels = torch.from_numpy(np.concatenate(labels))
     return graph, feats, labels, graph_gk
 
+# def updated_collate(sample):
+#     graphs, feats, labels = map(list, zip(*sample))
+#     graph = dgl.batch(graphs)
+#     new_feats = feats.copy()  # Clone the original tensor to avoid modifying it in-place
+#     for i in range(len(graphs.nodes)):
+#         node_feats = feats[i]
+#         if i in deepwalk_model.wv.key_to_index:
+#             new_feats[i] = torch.cat((node_feats.to(device), torch.from_numpy(deepwalk_model.wv[i]).to(device).double()), dim=0)
+#     new_feats = torch.from_numpy(np.concatenate(new_feats))
+#     labels = torch.from_numpy(np.concatenate(labels))
+#     return graph, new_feats, labels
+
 
 def get_teacher(args, data_info):
     '''args holds the common arguments
@@ -166,6 +179,7 @@ def get_student(args, data_info):
     '''args holds the common arguments
     data_info holds some special arugments
     '''
+    print("fjirjigfjreigjirejgirejigj",data_info['num_feats']*2)
     heads = ([args.s_num_heads] * args.s_num_layers) + [args.s_num_out_heads]
     model = GAT(args.s_num_layers,
             data_info['num_feats'],

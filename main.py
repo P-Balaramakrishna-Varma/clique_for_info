@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from dgl.data.ppi import PPIDataset
 import dgl
 import argparse
 from gat import GAT
@@ -19,6 +20,9 @@ import matplotlib.pyplot as plt
 import collections
 import random
 from tqdm import tqdm
+from node2vec import Node2Vec
+import networkx as nx
+from torch.utils.data import DataLoader
 
 torch.set_num_threads(1)
 
@@ -36,7 +40,6 @@ def train_student(args, auxiliary_model, data, device):
     # optimizer loading
     t_optimizer = auxiliary_model['t_model']['optimizer']
     s_optimizer = auxiliary_model['s_model']['optimizer']
-
     # loss functions
     bce_loss = torch.nn.BCEWithLogitsLoss()
     full_loss = FullLoss()
@@ -49,9 +52,44 @@ def train_student(args, auxiliary_model, data, device):
         loss_fcn = teacher_loss
     elif args.mode == 'mi':
         loss_fcn = mi_loss
+    # for batch, batch_data in enumerate(train_dataloader):
+    #     subgraph, feats, labels = batch_data
+    #     feats, labels = feats.to(device), labels.to(device)
+    #     for n in range(subgraph.number_of_nodes()):
+    #         new_feats = torch.cat((existing_feats, deepwalk_model.wv[n]), dim=0) # additional_feats is the new features you want to concatenate
+    """ new_batches = []
+    for batch, batch_data in enumerate(train_dataloader):
+        subgraph, feats, labels = batch_data
+        # feats, labels = feats.to(device), labels.to(device)
+        print(feats.shape)
+        batch_feats=torch.zeros((feats.shape[0],50))
+        
+        for i in subgraph.nodes():
+            node_feats = feats[i]
+            new_feats = feats[i]
+            # print(i)
+            if i==0:
+                print(next(iter(all_nodes)),type(next(iter(all_nodes))),type(str(i.item())))
+            # print(i,all_nodes)
+            if str(i.item()) in all_nodes:
+                # new_feats = torch.cat((node_feats.cpu(), torch.from_numpy(deepwalk_model.wv[i.item()]).double()), dim=0)
+                new_feats = torch.from_numpy(deepwalk_model.wv[i.item()]).double()
+                # print("dewfweffre",len(new_feats))
+            else:
+                # new_feats = torch.cat((node_feats.cpu(), torch.zeros(deepwalk_model.wv[0].shape).double()), dim=0)
+                new_feats = feats[i]
+            #feats[i] = new_feats
+            batch_feats[i]=new_feats
+        print(i)
+        new_batch_data = (subgraph, batch_feats, labels)
+        new_batches.append(new_batch_data)
+    new_dataloader = DataLoader(new_batches, batch_size=args.batch_size, collate_fn = collate, num_workers=train_dataloader.num_workers,shuffle = True) """
+    
+    # new_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, collate_fn=collate, num_workers=4, shuffle=True)
 
 
     for epoch in range(args.s_epochs):
+        print(epoch)
         t0 = time.time()
         if (epoch >= args.tofull) or (args.mode == 'mi' and epoch > args.warmup_epoch):
             args.mode = 'full'
@@ -111,12 +149,23 @@ def main(args):
     device = torch.device("cpu") if args.gpu<0 else torch.device("cuda:" + str(args.gpu))
     data, data_info = get_data_loader(args)
     model_dict = collect_model(args, data_info)
-
+    """ ppi_dataset = PPIDataset(mode='train')
+    ppi_graph, _ = ppi_dataset[0]
+    nx_graph = nx.DiGraph()
+    nx_graph.add_nodes_from(range(ppi_graph.number_of_nodes()))
+    src, dst = ppi_graph.edges()
+    nx_graph.add_edges_from(zip(src.numpy(), dst.numpy()))
+    node2vec = Node2Vec(nx_graph, dimensions=50, walk_length=100, num_walks=50, workers=4)
+    deepwalk_model = node2vec.fit(window=10, min_count=1, batch_words=4)
+    all_nodes = set()
+    for walk in node2vec.walks:
+        all_nodes.update(walk) """
     print("\n\n############ load/ train teacher and stats #############")
     load_teacher_and_stats(model_dict, args, data, device)
 
     print("############ train student with teacher #############")
     train_student(args, model_dict, data, device)
+    #,deepwalk_model,all_nodes
 
 
 
@@ -162,7 +211,9 @@ if __name__ == '__main__':
                         help="number of hidden layers")
     parser.add_argument("--s-num-hidden", type=int, default=68,
                         help="number of hidden units")
-    parser.add_argument("--target-layer", type=int, default=2,
+    parser.add_argument("--target-layers_student", type=int, default=[1,2],
+                        help="the layer of student to learn")
+    parser.add_argument("--target-layers-teacher", type=int, default=[0,1],
                         help="the layer of student to learn")
     
     parser.add_argument("--mode", type=str, default='mi')
@@ -185,5 +236,6 @@ if __name__ == '__main__':
     torch.cuda.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    
     
     main(args)

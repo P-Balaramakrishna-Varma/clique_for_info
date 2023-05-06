@@ -7,7 +7,7 @@ from plot_utils import statistics_feature
 from dgl.nn.pytorch.softmax import edge_softmax
 import dgl
 import dgl.function as fn
-from local_structure import get_graph_local_structure
+from local_structure import get_graph_local_structure,get_graph_twohop_local_structures
 
 
 statistics_plot = statistics_feature()
@@ -38,7 +38,7 @@ def loss_fn_kd(logits, logits_t, alpha=1.0, T=10.0):
     """
     logits: pre-softmax or sigmoid activation output of student
     logits_t: pre-softmax or sigmoid activation output of teacher
-    """
+   s """
     ce_loss_fn = nn.BCEWithLogitsLoss(reduction='none')
     kl_loss_fn = nn.KLDivLoss()
     mse_loss_fn = nn.MSELoss()
@@ -50,10 +50,11 @@ def loss_fn_kd(logits, logits_t, alpha=1.0, T=10.0):
     d_s = torch.log( torch.cat((torch.sigmoid(logits/T), 1-torch.sigmoid(logits/T)), dim=1) )
     d_t = torch.cat((torch.sigmoid(logits_t/T), 1-torch.sigmoid(logits_t/T)), dim=1)
     kl_loss = kl_loss_fn(d_s , d_t)*T*T
-    #mse_loss = mse_loss_fn(logits, logits_t)
+    #mse_loss = mse_loss_fn(logits, logit_t)
     return ce_loss*alpha + (1-alpha)*kl_loss
 
-def gen_mi_loss(t_model, middle_feats_s, subgraph, feats):
+def gen_mi_loss(t_model, middle_feats_s,s_target_lay,t_target_lay, subgraph, feats):
+    
     """
     Params:
         middle_feats_s  -   student's middle features
@@ -61,13 +62,22 @@ def gen_mi_loss(t_model, middle_feats_s, subgraph, feats):
         feats  -  the input features
         device - pytorch device
     """
+
     with torch.no_grad():
         _, middle_feats_t = t_model(subgraph, feats.float(), middle=True)
-        middle_feats_t = middle_feats_t[1]
-    
-    dist_t = get_graph_local_structure(subgraph, middle_feats_t)
-    dist_s = get_graph_local_structure(subgraph, middle_feats_s)
-    graphKL_loss = graph_KLDiv(subgraph, dist_s, dist_t)
+
+    graphKL_loss = 0
+    no_lay=min(len(s_target_lay),len(t_target_lay))
+    #print(t_target_lay,s_target_lay)
+    for i in range(no_lay):
+        #print(i)
+        lay_feats_t = middle_feats_t[t_target_lay[i]]
+        lay_feats_s = middle_feats_s[s_target_lay[i]]
+        
+        #print(lay_feats_t.shape, lay_feats_s.shape)
+        dist_t = get_graph_local_structure(subgraph,lay_feats_t)
+        dist_s = get_graph_local_structure(subgraph,lay_feats_s)
+        graphKL_loss += graph_KLDiv(subgraph, dist_s, dist_t)
     return graphKL_loss
 
 
